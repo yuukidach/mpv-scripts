@@ -4,6 +4,7 @@
 local mp = require 'mp'
 local utils = require 'mp.utils'
 local options = require 'mp.options'
+local msg = require 'mp.msg'         -- this is for debugging
 
 local M = {}
 
@@ -14,16 +15,17 @@ options.read_options(o)
 
 local cwd_root = utils.getcwd()
 
-local pl_root
+-- `pl` stands for playlist
+local pl_dir
 local pl_name
 local pl_path
 local pl_list = {}
 
 local pl_idx = 1
-local c_idx = 1
+local current_idx = 1
 
-local mk_name = ".mpv.history"
-local mk_path
+local BOOKMARK_NAME = ".mpv.history"
+local bookmark_path
 
 local wait_msg
 
@@ -52,17 +54,17 @@ function M.get_episode_num(idx)
     if idx > #pl_list then
         return ""
     end
-    local onm = pl_list[idx]:match("/([^/]+)$")
     local k = 1
+    onm = pl_list[idx]
     if(idx > 1) then
-        local name = pl_list[idx-1]:match("/([^/]+)$")
+        local name = pl_list[idx-1]
         local _, tk = M.compare(onm, name)
         if k < tk then
             k = tk
         end
     end
     if(idx < #pl_list) then
-        local name = pl_list[idx+1]:match("/([^/]+)$")
+        local name = pl_list[idx+1]
         local _, tk = M.compare(onm, name)
         if k < tk then
             k = tk
@@ -77,30 +79,67 @@ function M.get_episode_num(idx)
     return  onm:match("[0-9]+", k) or ""
 end
 
-function M.load_history()
-    local file = io.open(mk_path, "r")
+
+function M.is_bookmark_exist(bookmark_path)
+    local file = io.open(bookmark_path, "r")
     if file == nil then
-        print("can not open bookmark file")
+        msg.info('No bookmark file is found.')
         return false
     end
-    pl_name = file:read()
-    if pl_name == nil then
-        print("can not get file's name of last play")
-        file:close()
-        return false
-    else
-        pl_path = pl_root.."/"..pl_name
-    end
-    print("last paly:\n", pl_name, "\n")
-    file:close()
     return true
 end
 
+
+-- get the content of the bookmark
+-- Arg: bookmark_file (path)
+-- Return: nil / content of the bookmark
+function M.get_record(bookmark_path)
+    local file = io.open(bookmark_path, 'r')
+    local record = file:read()
+    if record == nil then
+        msg.info('No history record is found in the bookmark file.')
+        return nil
+    end
+    msg.info('last play: ' .. record)
+    file:close()
+    return record
+end
+
+
+function M.create_playlist(dir, ftype)
+    local file_list = utils.readdir(dir, 'files')
+    table.sort(file_list)
+    for i = 1, #file_list do
+        local file = file_list[i]
+        -- Usually the playlist will have the same extension name
+        -- When the extension name is different from the history
+        --     record, it means we are watching another playlist
+        if file:match('%' .. ftype .. '$') ~= nil then
+            table.insert(pl_list, file)
+            msg.info('Adding ' .. file)
+        end
+    end
+end
+
+
+-- get the index of the wanted file playlist
+function M.get_playlist_idx(dst_file)
+    local idx = nil
+    for i = 1, #pl_list do
+        if (dst_file == pl_list[i]) then
+            idx = i
+            return idx
+        end
+    end
+    return idx
+end
+
+
 -- creat a .history file
 function M.record_history()
-    local name = mp.get_property("filename")
+    local name = mp.get_property('filename')
     if not(name == nil) then
-        local file = io.open(mk_path, "w")
+        local file = io.open(bookmark_path, "w")
         file:write(name.."\n")
         file:close()
     end
@@ -128,7 +167,7 @@ function M.wait4jumping()
     if timeout < 10 then
         msg = "0"
     end
-    msg = wait_msg.."--continue? "..timeout.." [ENTER/n]"
+    msg = wait_msg.." -- continue? "..timeout.." [ENTER/n]"
     M.prompt_msg(msg, 1000)
 end
 
@@ -148,9 +187,10 @@ end
 function M.key_jump()
     M.unbind_key()
     M.wait_jump_timer:kill()
-    c_idx = pl_idx
-    mp.register_event("file-loaded", M.jump_resume)
-    mp.commandv("loadfile", pl_path)
+    current_idx = pl_idx
+    mp.register_event('file-loaded', M.jump_resume)
+    msg.info('Jumping to ' .. pl_path)
+    mp.commandv('loadfile', pl_path)
 end
 
 function M.jump_resume()
@@ -161,41 +201,37 @@ end
 -- main function of the file
 function M.exe()
     mp.unregister_event(M.exe)
-    local c_file = mp.get_property("filename")
-    local c_path = mp.get_property("path")
-    pl_root = c_path:match("(.+)/")
-    mk_path = pl_root.."/"..mk_name
-    if(not M.load_history()) then
-        pl_name = ""
-        pl_path = ""
+    local path = mp.get_property('path')
+    local dir, fname = utils.split_path(path)
+    local ftype = fname:match('%.([^.]+)$')
+    bookmark_path = dir .. BOOKMARK_NAME
+
+    msg.info('folder -- ' .. dir)
+    msg.info('playing -- ' .. fname)
+    msg.info('file type -- ' .. ftype)
+    msg.info('bookmark path -- ' .. bookmark_path)
+
+    if(not M.is_bookmark_exist(bookmark_path)) then
+        pl_name = nil
+    else
+        pl_name = M.get_record(bookmark_path)
+        pl_path = dir .. pl_name
     end
-    local c_type = c_file:match("%.([^.]+)$")
-    print("palying type:", c_type)
-    local pl_exist = false
-    if c_type ~= nil then
-        local temp_list = utils.readdir(pl_root.."/", "files")
-        table.sort(temp_list)
-        for i = 1, #temp_list do
-            local name = temp_list[i]
-            if name:match("%."..c_type.."$") ~= nil then
-                local path = pl_root.."/"..name
-                table.insert(pl_list, path)
-                if(pl_name == name) then
-                    pl_exist = true
-                    pl_idx = #pl_list
-                end
-                if(c_file == name) then
-                    c_idx = #pl_list
-                end
-            end
-        end
-    end
-    if(not pl_exist) then
-        pl_path = c_path
-        pl_name = c_file
-        pl_idx = c_idx
-    elseif (pl_idx ~= c_idx) then
+
+    M.create_playlist(dir, ftype)
+    pl_idx = M.get_playlist_idx(pl_name)
+    current_idx = M.get_playlist_idx(fname)
+
+    msg.info('playlist index -- ' .. pl_idx)
+    msg.info('current index -- ' .. current_idx)
+
+    if (pl_idx == nil) then
+        pl_idx = current_idx
+        pl_name = fname
+        pl_path = path
+    elseif (pl_idx ~= current_idx) then
         wait_msg = M.get_episode_num(pl_idx)
+        msg.info('Last watched episode -- ' .. wait_msg)
         M.wait_jump_timer = mp.add_periodic_timer(1, M.wait4jumping)
         M.bind_key()
     end
@@ -203,4 +239,5 @@ function M.exe()
     mp.add_hook("on_unload", 50, M.record_history)
     mp.observe_property("pause", "bool", M.pause)
 end
-mp.register_event("file-loaded", M.exe)
+
+mp.register_event('file-loaded', M.exe)
