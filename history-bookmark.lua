@@ -123,7 +123,12 @@ end
 
 
 -- get the index of the wanted file playlist
+-- if there is no playlist, return nil
 function M.get_playlist_idx(dst_file)
+    if (dst_file == nil) then
+        return nil
+    end
+
     local idx = nil
     for i = 1, #pl_list do
         if (dst_file == pl_list[i]) then
@@ -204,7 +209,7 @@ function M.exe()
     local path = mp.get_property('path')
     local dir, fname = utils.split_path(path)
     local ftype = fname:match('%.([^.]+)$')
-    bookmark_path = dir .. BOOKMARK_NAME
+    bookmark_path = utils.join_path(dir, BOOKMARK_NAME)
 
     msg.info('folder -- ' .. dir)
     msg.info('playing -- ' .. fname)
@@ -215,14 +220,19 @@ function M.exe()
         pl_name = nil
     else
         pl_name = M.get_record(bookmark_path)
-        pl_path = dir .. pl_name
+        pl_path = utils.join_path(dir, pl_name)
     end
 
     M.create_playlist(dir, ftype)
-    pl_idx = M.get_playlist_idx(pl_name)
-    current_idx = M.get_playlist_idx(fname)
 
-    msg.info('playlist index -- ' .. pl_idx)
+    pl_idx = M.get_playlist_idx(pl_name)
+    if (pl_idx == nil) then
+        msg.info('Playlist not found. Creating a new one...')
+    else
+        msg.info('playlist index --' .. pl_idx)
+    end
+
+    current_idx = M.get_playlist_idx(fname)
     msg.info('current index -- ' .. current_idx)
 
     if (pl_idx == nil) then
