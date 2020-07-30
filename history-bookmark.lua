@@ -185,8 +185,9 @@ function M.bind_key()
 end
 
 function M.unbind_key()
-    mp.remove_key_binding('ENTER')
-    mp.remove_key_binding('n')
+    msg.info('Unbinding the keys: \"Enter\", \"n\".')
+    mp.remove_key_binding('resume_yes')
+    mp.remove_key_binding('resume_not')
 end
 
 function M.key_jump()
