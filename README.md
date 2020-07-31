@@ -30,4 +30,6 @@ In order to resume from the exact point of the watching progress in target episo
 save-position-on-quit
 ```
 
+## Other scripts I recommend
 
+[autoload](https://github.com/mpv-player/mpv/blob/master/TOOLS/lua/autoload.lua): Automatically load playlist entries before and after the currently playing file, by scanning the directory. 
