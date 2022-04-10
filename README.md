@@ -1,15 +1,20 @@
 # mpv-scripts
+
 These are scripts written for mpv.
 
 ## How to use
-For Linux, move the `*.lua` files into `~/.config/mpv/scripts/`
+
+- Windows: move `.lua` files into `<path of mpv>/scripts/`
+- Linux: move `*.lua` files into `~/.config/mpv/scripts/`
 
 ## show_filename.lua
+
 A simple script to show the name of current playing file.  To use this function, you need to press `SHIFT+ENTER`.
 
 Besides, for better experience, you could adjust the `osd-font-size` property in mpv.conf  
 
 For example:
+
 ``` txt
 osd-font-size=30
 ```
@@ -32,4 +37,10 @@ save-position-on-quit
 
 ## Other scripts I recommend
 
-[autoload](https://github.com/mpv-player/mpv/blob/master/TOOLS/lua/autoload.lua): Automatically load playlist entries before and after the currently playing file, by scanning the directory. 
+[autoload](https://github.com/mpv-player/mpv/blob/master/TOOLS/lua/autoload.lua): Automatically load playlist entries before and after the currently playing file, by scanning the directory.
+
+## Contributors
+
+<a href="https://github.com/yuukidach/mpv-scripts/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=yuukidach/mpv-scripts" />
+</a>
