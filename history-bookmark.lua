@@ -1,275 +1,369 @@
---lite version of the code written by sorayuki
---only keep the function to record the histroy and recover it
-
 local mp = require 'mp'
-local utils = require 'mp.utils'
-local options = require 'mp.options'
-local msg = require 'mp.msg'         -- this is for debugging
+local mops = require 'mp.options'
+local mutils = require 'mp.utils'
+local mmsg = require 'mp.msg'
 
 local M = {}
 
 local o = {
-    save_period = 30,
-    excluded_dir = [[
-        []
-        ]], --excluded directories for shared, #windows: ["X:", "Z:", "F:\\Download\\"]
-    special_protocols = [[
-	["https?://", "magnet:", "rtmp:", "smb://", "bd://", "dvd://", "cdda://"]
-	]], --add above (after a comma) any protocol to disable
+    save_period = 30,  -- time interval for saving history
+    exclude_dir = {},  -- directories to be excluded
+    exclude_proto = {
+        'https?://', 'magnet://', 'rtmp://', 'smb://', 'ftp://', 'bd://',
+        'dvb://', 'bluray://', 'dvd://', 'tv://', 'dshow://', 'cdda://',
+    }                  -- protocols to be excluded
 }
-options.read_options(o)
-
-o.excluded_dir = utils.parse_json(o.excluded_dir)
-o.special_protocols = utils.parse_json(o.special_protocols)
-
-local cwd_root = utils.getcwd()
-
--- `pl` stands for playlist
-local pl_dir
-local pl_name
-local pl_path
-local pl_list = {}
-
-local pl_idx = 1
-local current_idx = 1
+mops.read_options(o)
 
 local BOOKMARK_NAME = ".mpv.history"
-local bookmark_path
 
-local wait_msg
 
-function need_ignore(tab, val)
-	for index, element in ipairs(tab) do
-		if (val:find(element) == 1) then
-			return true
-		end
-	end
-	return false
+-- param/env/... checking proess
+local CheckPipeline = {}
+
+function any(t, f)
+    for _, v in ipairs(t) do
+        if f(v) then return true end
+    end
+    return false
 end
 
-function M.prompt_msg(msg, ms)
+function CheckPipeline.is_exclude(url)
+    local is_local_file = url:find('^file://') == 1 or not url:find('://')
+    local contain = function(x) return url:find(x) == 1 end
+    if is_local_file then
+        return any(o.exclude_dir, contain)
+    else
+        return any(o.exclude_proto, contain)
+    end
+end
+
+
+---
+---Wrapper for mp.commandv().
+---
+---@param msg string The message to be displayed.
+---@param ms number The duration of the message in milliseconds.
+---@return nil
+local function prompt(msg, ms)
     mp.commandv("show-text", msg, ms)
 end
 
-function M.compare(s1, s2)
-    local l1 = #s1
-    local l2 = #s2
-    local len = l2
-    if l1 < l2 then
-        local len = l1
-    end
-    for i = 1, len do
-        if s1:sub(i,i) < s2:sub(i,i) then
-            return -1, i-1
-        elseif s1:sub(i,i) > s2:sub(i,i) then
-            return 1, i-1
-        end
-    end
-    return 0, len
-end
 
-function M.get_episode_num(idx)
-    if idx > #pl_list then
-        return ""
-    end
-    local k = 1
-    onm = pl_list[idx]
-    if(idx > 1) then
-        local name = pl_list[idx-1]
-        local _, tk = M.compare(onm, name)
-        if k < tk then
-            k = tk
+---
+---Get season and episode number from the file name.
+---
+---@param fname string The file name.
+---@param ref string The reference file name for the episode number.
+---@return number?, number?
+local function get_episode_info(fname, ref)
+    -- Add custom patterns here.
+    local patterns = {
+        '[Ss](%d+)[Ee](%d+)',            -- "S01E02"
+        'season.+(%d+).+episode.+(%d+)', -- "season 1 episode 2"
+    }
+
+    -- Try to match the season and episode number.
+    for _, pattern in ipairs(patterns) do
+        local season, ep = fname:match(pattern)
+        if season and ep then
+            return tonumber(season), tonumber(ep)
         end
     end
-    if(idx < #pl_list) then
-        local name = pl_list[idx+1]
-        local _, tk = M.compare(onm, name)
-        if k < tk then
-            k = tk
+
+    -- Try to match the episode number only.
+    -- match all possible numbers
+    local nums, ref_nums = {}, {}
+    for num in fname:gmatch('%d+') do table.insert(nums, tonumber(num)) end
+    for num in ref:gmatch('%d+') do table.insert(ref_nums, tonumber(num)) end
+    -- for each nums, compare with each ref_nums and store min diff
+    local most_likely, min_diff = nil, math.huge
+    for _, num in ipairs(nums) do
+        for _, ref_num in ipairs(ref_nums) do
+            local diff = math.abs(num - ref_num)
+            if diff ~= 0 and diff < min_diff then
+                most_likely, min_diff = num, diff
+            end
         end
     end
-    while k > 1 do
-        if onm:match("^[0-9]+", k-1) == nil then
-            break
-        end
-        k = k - 1
-    end
-    return  onm:match("[0-9]+", k) or ""
+
+    return nil, most_likely
 end
 
 
-function M.is_bookmark_exist(bookmark_path)
-    local file = io.open(bookmark_path, "r")
+-- *****************************************************************************
+-- Bookmark logic
+-- *****************************************************************************
+---
+---Bookmark class
+---
+---@class Bookmark
+local Bookmark = {}
+Bookmark.__index = Bookmark
+
+---
+---Create a new Bookmark object.
+---
+---@param dir string Directory to save the bookmark file.
+---@param name string? Name of the bookmark file.
+---@return Bookmark
+function Bookmark:new(dir, name)
+    local o = {}
+    setmetatable(o, self)
+    o.dir = dir
+    o.name = name or BOOKMARK_NAME
+    o.path = mutils.join_path(dir, o.name)
+    return o
+end
+
+---
+---Check if the bookmark file exists.
+---
+---@return boolean
+function Bookmark:exist()
+    local file = io.open(self.path, "r")
     if file == nil then
-        msg.info('No bookmark file is found.')
         return false
     end
+    file:close()
     return true
 end
 
-
--- get the content of the bookmark
--- Arg: bookmark_file (path)
--- Return: nil / content of the bookmark
-function M.get_record(bookmark_path)
-    local file = io.open(bookmark_path, 'r')
+---
+---Get the content of the bookmark file.
+---
+---@return string?
+function Bookmark:read()
+    local file = io.open(self.path, "r")
     local record = file:read()
-    if record == nil then
-        msg.info('No history record is found in the bookmark file.')
-        return nil
-    end
-    msg.info('last play: ' .. record)
     file:close()
     return record
 end
 
+---
+---Write the content to the bookmark file.
+---
+---@param content string The content to be written.
+---@return nil
+function Bookmark:write(content)
+    local file = io.open(self.path, "w")
+    file:write(content .. "\n")
+    file:close()
+end
 
-function M.create_playlist(dir, ftype)
-    local file_list = utils.readdir(dir, 'files')
+---
+---Delete the bookmark file.
+---
+---@return nil
+function Bookmark:delete()
+    os.remove(self.path)
+end
+
+
+-- *****************************************************************************
+-- Playlist logic
+-- *****************************************************************************
+---
+---Playlist class
+---
+---@class Playlist
+local Playlist = {}
+Playlist.__index = Playlist
+
+---
+---Create a new Playlist object.
+---
+---@param dir string The media directory.
+---@param exts string[]? The extensions of the media files.
+---@return Playlist
+function Playlist:new(dir, exts)
+    local o = {}
+    setmetatable(o, self)
+    o.dir = dir
+    o.exts = exts or {}
+    o.files = {}
+    o.bookmark = Bookmark:new(dir)
+    o:scan()
+    return o
+end
+
+---
+---Reload the playlist.
+---
+---@param dir string The media directory.
+---@return nil
+function Playlist:reload(dir)
+    self.dir = dir
+    self.files = {}
+    self.bookmark = Bookmark:new(dir)
+    self:scan()
+end
+
+---
+---Scan the media files in the directory.
+---
+---@return nil
+function Playlist:scan()
+    local file_list = mutils.readdir(self.dir, 'files')
     table.sort(file_list)
-    for i = 1, #file_list do
-        local file = file_list[i]
-        -- Usually the playlist will have the same extension name
-        -- When the extension name is different from the history
-        --     record, it means we are watching another playlist
-        if file:match('%' .. ftype .. '$') ~= nil then
-            table.insert(pl_list, file)
-            msg.info('Adding ' .. file)
+    for _, file in ipairs(file_list) do
+        -- get file extension
+        local ftype = file:match('%.([^.]+)$')
+        mmsg.info('Playlist scaned: ' .. file)
+        -- if file type is in the extension list
+        if ftype and (#self.exts == 0 or self.exts[ftype]) then
+            table.insert(self.files, file)
+            mmsg.info('Playlist added: ' .. file)
         end
     end
 end
 
+---
+---Check if the playlist is empty.
+---
+---@return boolean
+function Playlist:empty()
+    return #self.files == 0
+end
 
--- get the index of the wanted file playlist
--- if there is no playlist, return nil
-function M.get_playlist_idx(dst_file)
-    if (dst_file == nil) then
+---
+---Restore last watched episode.
+---
+---@return string? The name of the last watched episode.
+function Playlist:restore()
+    if not self.bookmark:exist() then
         return nil
     end
-
-    local idx = nil
-    for i = 1, #pl_list do
-        if (dst_file == pl_list[i]) then
-            idx = i
-            return idx
-        end
-    end
-    return idx
+    local record = self.bookmark:read()
+    -- history record is written in the first line
+    local name = record:match('([^\n]+)')
+    return name
 end
 
 
--- creat a .history file
+---
+---Save the history.
+---
+---@param name string The name of the last watched episode.
+---@return nil
+function Playlist:record(name)
+    self.bookmark:write(name)
+end
+
+
+-- *****************************************************************************
+-- mpv event handlers
+-- *****************************************************************************
+M.playlist = Playlist:new(mutils.getcwd())
+
+-- record process
 function M.record_history()
-    local name = mp.get_property('filename')
-    if not(name == nil) then
-        local file = io.open(bookmark_path, "w")
-        file:write(name.."\n")
-        file:close()
+    local path = mp.get_property('path')
+    local dir, fname = mutils.split_path(path)
+    M.playlist:reload(dir)
+    if M.playlist:empty() then
+        mmsg.warn('No media file found in the directory.')
+        return
     end
+    M.playlist:record(fname)
+    mmsg.info('Recorded: ' .. fname)
 end
 
--- record the file name when video is paused
--- and stop the timer
-function M.pause(name, paused)
+local timeout = 15
+function M.resume_count_down()
+    timeout = timeout - 1
+    mmsg.info('Count down: ' .. timeout)
+    -- count down only at the beginning
+    if (timeout < 1) then
+        M.unbind_key()
+        return
+    end
+
+    local jump_file = M.playlist:restore()
+    if not jump_file or jump_file == mp.get_property('filename') then
+        M.unbind_key()
+        return
+    end
+
+    local msg = 'Last watched: '
+    local season, ep = get_episode_info(jump_file, mp.get_property('filename'))
+    if not ep then
+        mmsg.warn('Failed to parse the episode number.')
+        msg = msg .. jump_file
+    elseif not season then
+        msg = msg .. 'EP ' .. ep
+    else
+        msg = msg .. 'S' .. season .. 'E' .. ep
+    end
+
+    msg = msg .. " -- continue? " .. timeout .. " [ENTER/n]"
+    prompt(msg, 1000)
+end
+
+---
+---record the file name when video is paused
+---
+---@param name any
+---@param paused any
+---@return nil
+function M.on_pause(name, paused)
     if paused then
-        M.timer4saving_history:stop()
+        M.record_timer:stop()
         M.record_history()
     else
-        M.timer4saving_history:resume()
+        M.record_timer:resume()
     end
 end
 
-local timeout = 15 
-function M.wait4jumping()
-    timeout = timeout - 1
-    if(timeout < 1) then
-        M.wait_jump_timer:kill()
-        M.unbind_key()
-    end
-    local msg = ""
-    if timeout < 10 then
-        msg = "0"
-    end
-    msg = wait_msg.." -- continue? "..timeout.." [ENTER/n]"
-    M.prompt_msg(msg, 1000)
-end
 
+-- *****************************************************************************
+-- mpv key bindings
+-- *****************************************************************************
 function M.bind_key()
-    mp.add_key_binding('ENTER', 'resume_yes', M.key_jump)
+    mp.add_key_binding('ENTER', 'resume_yes', function ()
+        local fname = M.playlist:restore()
+        local dir = M.playlist.dir
+        local path = mutils.join_path(dir, fname)
+        mmsg.info('Jumping to ' .. path)
+        mp.commandv('loadfile', path)
+        M.unbind_key()
+        prompt('Resume successfully', 1500)
+    end)
     mp.add_key_binding('n', 'resume_not', function()
         M.unbind_key()
-        M.wait_jump_timer:kill()
+        mmsg.info('Stay at the current episode.')
     end)
+    mmsg.info('Bound  the keys: \"Enter\", \"n\".')
 end
 
 function M.unbind_key()
-    msg.info('Unbinding the keys: \"Enter\", \"n\".')
     mp.remove_key_binding('resume_yes')
     mp.remove_key_binding('resume_not')
+    mmsg.info('Unbound the keys: \"Enter\", \"n\".')
+
+    M.record_timer:kill()
+    timeout = 0
+    mmsg.info('Resume count down stopped.')
 end
 
-function M.key_jump()
-    M.unbind_key()
-    M.wait_jump_timer:kill()
-    current_idx = pl_idx
-    mp.register_event('file-loaded', M.jump_resume)
-    msg.info('Jumping to ' .. pl_path)
-    mp.commandv('loadfile', pl_path)
-end
 
-function M.jump_resume()
-    mp.unregister_event(M.jump_resume)
-    M.prompt_msg("resume successfully", 1500)
-end
-
--- main function of the file
-function M.exe()
-    mp.unregister_event(M.exe)
-    local path = mp.get_property('path')
-    local dir, fname = utils.split_path(path)
-    local ftype = fname:match('%.([^.]+)$')
-    bookmark_path = utils.join_path(dir, BOOKMARK_NAME)
-
-    if need_ignore(o.special_protocols, path) then return end
-    if need_ignore(o.excluded_dir, dir) then return end
-
-    msg.info('folder -- ' .. dir)
-    msg.info('playing -- ' .. fname)
-    msg.info('file type -- ' .. ftype)
-    msg.info('bookmark path -- ' .. bookmark_path)
-
-    if(not M.is_bookmark_exist(bookmark_path)) then
-        pl_name = nil
-    else
-        pl_name = M.get_record(bookmark_path)
-        pl_path = utils.join_path(dir, pl_name)
+-- *****************************************************************************
+-- register
+-- *****************************************************************************
+mp.register_event('file-loaded', function ()
+    local fpath = mp.get_property('path')
+    if CheckPipeline.is_exclude(fpath) then
+        mmsg.info('The file is excluded.')
+        return
     end
+    local dir, _ = mutils.split_path(fpath)
+    mmsg.info('Loaded file: ' .. fpath)
+    if not dir then return end
 
-    M.create_playlist(dir, ftype)
+    M.record_timer = mp.add_periodic_timer(o.save_period, M.record_history)
+    M.resume_timer = mp.add_periodic_timer(1, M.resume_count_down)
 
-    pl_idx = M.get_playlist_idx(pl_name)
-    if (pl_idx == nil) then
-        msg.info('Playlist not found. Creating a new one...')
-    else
-        msg.info('playlist index --' .. pl_idx)
-    end
-
-    current_idx = M.get_playlist_idx(fname)
-    msg.info('current index -- ' .. current_idx)
-
-    if (pl_idx == nil) then
-        pl_idx = current_idx
-        pl_name = fname
-        pl_path = path
-    elseif (pl_idx ~= current_idx) then
-        wait_msg = M.get_episode_num(pl_idx)
-        msg.info('Last watched episode -- ' .. wait_msg)
-        M.wait_jump_timer = mp.add_periodic_timer(1, M.wait4jumping)
-        M.bind_key()
-    end
-    M.timer4saving_history = mp.add_periodic_timer(o.save_period, M.record_history)
+    M.bind_key()
+    mp.observe_property("pause", "bool", M.on_pause)
     mp.add_hook("on_unload", 50, M.record_history)
-    mp.observe_property("pause", "bool", M.pause)
-end
-
-mp.register_event('file-loaded', M.exe)
+end)
