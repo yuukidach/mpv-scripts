@@ -19,6 +19,43 @@ local o = {
 }
 mops.read_options(o)
 
+function Set (t)
+    local set = {}
+    for _, v in pairs(t) do set[v] = true end
+    return set
+end
+
+function SetUnion (a,b)
+    local res = {}
+    for k in pairs(a) do res[k] = true end
+    for k in pairs(b) do res[k] = true end
+    return res
+end
+
+function LenSet (s)
+    local len = 0
+    for _ in pairs(s) do len = len + 1 end
+    return len
+end
+
+EXTENSIONS_VIDEO = Set {
+    '3g2', '3gp', 'avi', 'flv', 'm2ts', 'm4v', 'mj2', 'mkv', 'mov',
+    'mp4', 'mpeg', 'mpg', 'ogv', 'rmvb', 'webm', 'wmv', 'y4m'
+}
+
+EXTENSIONS_AUDIO = Set {
+    'aiff', 'ape', 'au', 'flac', 'm4a', 'mka', 'mp3', 'oga', 'ogg',
+    'ogm', 'opus', 'wav', 'wma'
+}
+
+EXTENSIONS_IMAGES = Set {
+    'avif', 'bmp', 'gif', 'j2k', 'jp2', 'jpeg', 'jpg', 'jxl', 'png',
+    'svg', 'tga', 'tif', 'tiff', 'webp'
+}
+
+EXTENSIONS = SetUnion(EXTENSIONS_VIDEO, EXTENSIONS_AUDIO)
+EXTENSIONS = SetUnion(EXTENSIONS, EXTENSIONS_IMAGES)
+
 -- param/env/... checking proess
 local CheckPipeline = {}
 
@@ -138,9 +175,9 @@ end
 
 local function bit_xor(a, b)
     local p, c = 1, 0
-    while a > 0 and b > 0 do
+    while a > 0 or b > 0 do
         local ra, rb = a % 2, b % 2
-        if ra + rb > 0 then c = c + p end
+        if ra + rb == 1 then c = c + p end
         a, b, p = (a - ra) / 2, (b - rb) / 2, p * 2
     end
     return c
@@ -348,7 +385,7 @@ function History:save(record)
     file:write(json_str)
     file:close()
 
-    msg.info(string.format('History saved to: %s', path))
+    msg.info(string.format('History saved to: %s, vedio path: %s', path, record.dir))
     return true
 end
 
@@ -360,7 +397,7 @@ end
 function History:load(dir)
     local file_name = fnv1a_hash(dir)
     local path = join_path(self.dir, file_name)
-    msg.info(string.format('Loading history from file: %s', path))
+    msg.info(string.format('Loading history from file: %s of dir: %s', path, dir))
     local file = io.open(path, "r")
     if file == nil then
         msg.warn(string.format('history:load -- Failed to open history file: %s', path))
@@ -457,15 +494,14 @@ function Playlist:new(dir, exts)
     local playlist = {}
     setmetatable(playlist, self)
     playlist.dir = dir
-    playlist.exts = exts or {}
+    playlist.exts = exts or EXTENSIONS
     playlist.files = {}
-    -- playlist.bookmark = Bookmark:new(dir)
     playlist.history = get_history_manager()
 
-    msg.info('Playlist created: ' .. dir)
+    msg.info('Playlist created in: ' .. dir)
 
     if playlist.history == nil then
-        msg.warn('Failed to get history manager.')
+        msg.error('Failed to get history manager.')
         os.exit(1)
     end
 
@@ -495,9 +531,8 @@ function Playlist:scan()
     for _, file in ipairs(file_list) do
         -- get file extension
         local ftype = file:match('%.([^.]+)$')
-        msg.info('Playlist scaned: ' .. file)
         -- if file type is in the extension list
-        if ftype and (#self.exts == 0 or self.exts[ftype]) then
+        if ftype and (self.exts[ftype] or LenSet(self.exts) == 0) then
             table.insert(self.files, file)
             msg.info('Playlist added: ' .. file)
         end
