@@ -96,16 +96,41 @@ local function mpv_show_text(msg, ms)
 end
 
 
+local function levenshtein(s, t)
+    local m, n = #s, #t
+    local d = {}
+    for i = 0, m do d[i] = {} end
+    for i = 0, m do d[i][0] = i end
+    for j = 0, n do d[0][j] = j end
+    for i = 1, m do
+        for j = 1, n do
+            d[i][j] = math.min(
+                d[i - 1][j] + 1,
+                d[i][j - 1] + 1,
+                d[i - 1][j - 1] + (s:sub(i, i) == t:sub(j, j) and 0 or 1)
+            )
+        end
+    end
+    return d[m][n]
+end
+
+local split_string = function(str, sep)
+    local fields = {}
+    local pattern = string.format("([^%s]+)", sep)
+    str:gsub(pattern, function(c) fields[#fields + 1] = c end)
+    return fields
+end
+
 ---
 ---Get season and episode number from the file name.
 ---
 ---@param fname string The file name.
----@param ref string The reference file name for the episode number.
+---@param ref_fname string The reference file names.
 ---@return number?, number? The season and episode number.
-local function get_episode_info(fname, ref)
+local function get_episode_info(fname, ref_fname)
     -- Add custom patterns here.
     local patterns = {
-        '[Ss](%d+)[Ee](%d+)',            -- "S01E02"
+        '[Ss](%d+)[^%d]+(%d+)',          -- "S01E02", "S1 - 03"
         'season.+(%d+).+episode.+(%d+)', -- "season 1 episode 2"
     }
 
@@ -117,23 +142,36 @@ local function get_episode_info(fname, ref)
         end
     end
 
-    -- Try to match the episode number only.
-    -- match all possible numbers
-    local nums, ref_nums = {}, {}
-    for num in fname:gmatch('%d+') do table.insert(nums, tonumber(num)) end
-    for num in ref:gmatch('%d+') do table.insert(ref_nums, tonumber(num)) end
-    -- for each nums, compare with each ref_nums and store min diff
-    local most_likely, min_diff = nil, math.huge
-    for _, num in ipairs(nums) do
-        for _, ref_num in ipairs(ref_nums) do
-            local diff = math.abs(num - ref_num)
-            if diff ~= 0 and diff < min_diff then
-                most_likely, min_diff = num, diff
+    -- ep numbers are usually the only different part in the file names
+    -- so we can find the most likely ep number by comparing the file name
+    -- with the reference file names
+
+    -- try to split by space, dot and _
+    local fname_parts = split_string(fname, '%s%.%_')
+    local ref_parts = split_string(ref_fname, '%s%.%_')
+    if #fname_parts ~= #ref_parts then
+        msg.warn(string.format('Failed to parse the episode number: %s', fname))
+        return nil, nil
+    end
+
+    -- zip the two lists and calculate the levenshtein distance
+    for i, fname_part in ipairs(fname_parts) do
+        local ref_part = ref_parts[i]
+        local dist = levenshtein(fname_part, ref_part)
+        if dist ~= 0 then
+            -- grep the number from the string
+            local nums, ref_nums = {}, {}
+            for num in fname_part:gmatch('%d+') do table.insert(nums, tonumber(num)) end
+            for num in ref_part:gmatch('%d+') do table.insert(ref_nums, tonumber(num)) end
+            for j, num in ipairs(nums) do
+                if num ~= ref_nums[j] then
+                    return nil, num
+                end
             end
         end
     end
 
-    return nil, most_likely
+    return nil, nil
 end
 
 
@@ -618,7 +656,7 @@ function M.resume_count_down()
     local prompt_text = 'Last watched: '
     if not ep then
         msg.warn('Failed to parse the episode number.')
-        prompt_text = prompt_text .. jump_file
+        prompt_text = 'Jump to the last watched episode?'
     elseif not season then
         prompt_text = prompt_text .. 'EP ' .. ep
     else
