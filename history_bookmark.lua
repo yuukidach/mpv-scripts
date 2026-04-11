@@ -81,7 +81,7 @@ end
 ---
 ---@return string The name of the system.
 local function get_system_name()
-    return mp.get_property_native("platform", {})
+    return mp.get_property_native("platform", "")
 end
 
 
@@ -301,14 +301,14 @@ History.__index = History
 function History:from_outer_dir(dir)
     local history = {}
     setmetatable(history, self)
-    self.dir = join_path(dir, 'history')
+    history.dir = join_path(dir, 'history')
     return history
 end
 
 function History:from_dir(dir)
     local history = {}
     setmetatable(history, self)
-    self.dir = dir
+    history.dir = dir
     return history
 end
 
@@ -326,7 +326,7 @@ setmetatable(History, {
 ---
 ---@return boolean
 function History:exist()
-    if io.open(self.dir, "r") == nil then
+    if utils.readdir(self.dir) == nil then
         return false
     end
     return true
@@ -344,7 +344,7 @@ function History:make_sure_exists()
 
     local ok, err = makedirs(self.dir)
     if not ok then
-        msg.erro(string.format('Failed to create history directory: %s', err))
+        msg.error(string.format('Failed to create history directory: %s', err))
     else
         msg.info(string.format('History directory created: %s', self.dir))
     end
@@ -416,7 +416,7 @@ function History:save(record)
     end
     local json_str, error = utils.format_json(record)
     if error ~= nil then
-        msg.error(string.format('Failed to encode history file: %s, err: %s', path, status))
+        msg.error(string.format('Failed to encode history file: %s, err: %s', path, error))
         return false
     end
 
@@ -461,54 +461,17 @@ function History:delete(dir)
     os.remove(path)
 end
 
-local WinHistory = {}
-WinHistory.__index = WinHistory
-
-function WinHistory:new(cache_dir)
-    cache_dir = cache_dir or os.getenv('APPDATA') .. '\\mpv'
-    local win_history = History:from_dir(cache_dir .. '\\history')
-    setmetatable(win_history, self)
-    return win_history
-end
-
-setmetatable(WinHistory, {
-    __index = History,
-    __call = function(cls, ...)
-        local self = setmetatable({}, cls)
-        return self:new(...)
-    end
-})
-
-
-local UnixHistory = {}
-UnixHistory.__index = UnixHistory
-
-function UnixHistory:new(cache_dir)
-    cache_dir = cache_dir or os.getenv('HOME') .. '/.mpv'
-    local unix_history = History:from_dir(cache_dir .. '/history')
-    setmetatable(unix_history, self)
-    return unix_history
-end
-
-setmetatable(UnixHistory, {
-    __index = History,
-    __call = function(cls, ...)
-        local self = setmetatable({}, cls)
-        return self:new(...)
-    end
-})
-
 local function get_history_manager()
-    local system = get_system_name()
-    msg.info(string.format('System: %s', system))
-    if system == WINDOWS then
-        return WinHistory:new()
-    elseif system == LINUX or system == MACOSX then
-        return UnixHistory:new()
-    else
-        msg.warn(string.format('Unsupported system: %s', system))
+    local config_dir = mp.command_native({"expand-path", "~~/"})
+    if not config_dir then
+        msg.error('Failed to get mpv config directory.')
         return nil
     end
+    local history = {}
+    setmetatable(history, History)
+    history.dir = join_path(config_dir, 'history')
+    msg.info(string.format('History directory: %s', history.dir))
+    return history
 end
 
 
@@ -690,7 +653,7 @@ end
 function M.on_load()
     local records = M.playlist.history:list()
     for _, record in ipairs(records) do
-        if io.open(record.dir) == nil then
+        if utils.readdir(record.dir) == nil then
             msg.info('Removing history file: ' .. record.dir)
             M.playlist.history:delete(record.dir)
         end
