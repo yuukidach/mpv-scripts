@@ -122,6 +122,32 @@ local split_string = function(str, sep)
 end
 
 ---
+---Natural sort comparator. Compares strings by splitting them into text and
+---numeric parts, so that "Episode 2" < "Episode 10".
+---
+---@param a string
+---@param b string
+---@return boolean
+local function natural_sort(a, b)
+    local function split(s)
+        local parts = {}
+        for text, num in s:gmatch("(%D*)(%d*)") do
+            if text ~= "" then table.insert(parts, text:lower()) end
+            if num ~= "" then table.insert(parts, tonumber(num)) end
+        end
+        return parts
+    end
+    local pa, pb = split(a), split(b)
+    for i = 1, math.min(#pa, #pb) do
+        if type(pa[i]) ~= type(pb[i]) then
+            return type(pa[i]) == "number"
+        end
+        if pa[i] ~= pb[i] then return pa[i] < pb[i] end
+    end
+    return #pa < #pb
+end
+
+---
 ---Get season and episode number from the file name.
 ---
 ---@param fname string The file name.
@@ -528,7 +554,11 @@ end
 ---@return nil
 function Playlist:scan()
     local file_list = utils.readdir(self.dir, 'files')
-    table.sort(file_list)
+    if not file_list then
+        msg.warn('Failed to read directory: ' .. self.dir)
+        return
+    end
+    table.sort(file_list, natural_sort)
     for _, file in ipairs(file_list) do
         -- get file extension
         local ftype = file:match('%.([^.]+)$')
@@ -570,7 +600,12 @@ end
 ---@return nil
 function Playlist:record(name)
     -- get episode number from the file name
-    local season, ep = get_episode_info(name, self.files[1])
+    -- use a different file as reference to avoid comparing with self
+    local ref = self.files[1]
+    if ref == name and #self.files > 1 then
+        ref = self.files[2]
+    end
+    local season, ep = get_episode_info(name, ref)
     msg.info('Recording: ')
     msg.info(string.format('\tDirectory: %s', self.dir))
     msg.info(string.format('\tName: %s', name))
@@ -582,10 +617,12 @@ end
 -- mpv event handlers
 -- *****************************************************************************
 M.playlist = Playlist:new(utils.getcwd())
+M.initialized = false
 
 -- record process
 function M.record_history()
     local path = mp.get_property('path')
+    if not path then return end
     local dir, fname = utils.split_path(path)
     M.playlist:reload(dir)
     if M.playlist:empty() then
@@ -597,33 +634,23 @@ function M.record_history()
 end
 
 local timeout = 15
+local resume_info = nil  -- cached on file load, avoids rescanning every second
+
 function M.resume_count_down()
     timeout = timeout - 1
     msg.info('Count down: ' .. timeout)
-    -- count down only at the beginning
-    if (timeout < 1) then
-        M.unbind_key()
-        return
-    end
-
-    local path = mp.get_property('path')
-    msg.info('Resuming from dir: ' .. path)
-    local dir, _ = utils.split_path(path)
-    M.playlist:reload(dir)
-    local jump_file, season, ep = M.playlist:restore()
-    if not jump_file or jump_file == mp.get_property('filename') then
+    if timeout < 1 or not resume_info then
         M.unbind_key()
         return
     end
 
     local prompt_text = 'Last watched: '
-    if not ep then
-        msg.warn('Failed to parse the episode number.')
+    if not resume_info.ep then
         prompt_text = 'Jump to the last watched episode?'
-    elseif not season then
-        prompt_text = prompt_text .. 'EP ' .. ep
+    elseif not resume_info.season then
+        prompt_text = prompt_text .. 'EP ' .. resume_info.ep
     else
-        prompt_text = prompt_text .. 'S' .. season .. 'E' .. ep
+        prompt_text = prompt_text .. 'S' .. resume_info.season .. 'E' .. resume_info.ep
     end
 
     prompt_text = prompt_text .. " -- continue? " .. timeout .. " [ENTER/n]"
@@ -646,11 +673,11 @@ function M.on_pause(name, paused)
 end
 
 ---
----Clean history files when mpv start up. look through each record and remove
----the record if the record's directory does not exist.
+---Clean history files once at startup. Remove records whose directories
+---no longer exist.
 ---
 ---@return nil
-function M.on_load()
+local function cleanup_history()
     local records = M.playlist.history:list()
     for _, record in ipairs(records) do
         if utils.readdir(record.dir) == nil then
@@ -659,15 +686,16 @@ function M.on_load()
         end
     end
 end
+cleanup_history()
 
 -- *****************************************************************************
 -- mpv key bindings
 -- *****************************************************************************
 function M.bind_key()
     mp.add_key_binding('ENTER', 'resume_yes', function()
-        local fname = M.playlist:restore()
+        if not resume_info then return end
         local dir = M.playlist.dir
-        local path = join_path(dir, fname)
+        local path = join_path(dir, resume_info.fname)
         msg.info('Jumping to ' .. path)
         mp.commandv('loadfile', path)
         M.unbind_key()
@@ -685,9 +713,33 @@ function M.unbind_key()
     mp.remove_key_binding('resume_not')
     msg.info('Unbound the keys: \"Enter\", \"n\".')
 
-    M.record_timer:kill()
+    if M.resume_timer then
+        M.resume_timer:kill()
+        M.resume_timer = nil
+    end
+    resume_info = nil
     timeout = 0
     msg.info('Resume count down stopped.')
+end
+
+-- *****************************************************************************
+-- cleanup helper
+-- *****************************************************************************
+function M.cleanup()
+    if M.record_timer then
+        M.record_timer:kill()
+        M.record_timer = nil
+    end
+    if M.resume_timer then
+        M.resume_timer:kill()
+        M.resume_timer = nil
+    end
+    mp.remove_key_binding('resume_yes')
+    mp.remove_key_binding('resume_not')
+    if M.initialized then
+        mp.unobserve_property(M.on_pause)
+    end
+    resume_info = nil
 end
 
 -- *****************************************************************************
@@ -703,11 +755,24 @@ mp.register_event('file-loaded', function()
     msg.info('Loaded file: ' .. fpath)
     if not dir then return end
 
+    -- clean up previous file's resources
+    M.cleanup()
+
+    -- reset timeout for resume prompt
+    timeout = 15
+
+    -- check if there's a resume target
+    M.playlist:reload(dir)
+    local jump_file, season, ep = M.playlist:restore()
+    if jump_file and jump_file ~= mp.get_property('filename') then
+        resume_info = { fname = jump_file, season = season, ep = ep }
+    end
+
     M.record_timer = mp.add_periodic_timer(o.save_period, M.record_history)
     M.resume_timer = mp.add_periodic_timer(1, M.resume_count_down)
 
     M.bind_key()
     mp.observe_property("pause", "bool", M.on_pause)
+    M.initialized = true
     mp.add_hook("on_unload", 50, M.record_history)
-    mp.add_hook("on_load", 50, M.on_load)
 end)
