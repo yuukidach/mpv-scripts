@@ -651,9 +651,14 @@ end
 -- *****************************************************************************
 M.playlist = Playlist:new(utils.getcwd())
 M.initialized = false
+M.is_resuming = false  -- flag to skip saving during resume jump
 
 -- record process
 function M.record_history()
+    if M.is_resuming then
+        msg.info('Skipping record during resume jump')
+        return
+    end
     local path = mp.get_property('path')
     if not path then return end
     local dir, fname = utils.split_path(path)
@@ -738,6 +743,7 @@ function M.bind_key()
         local dir = M.playlist.dir
         local path = join_path(dir, resume_info.fname)
         msg.info('Jumping to ' .. path)
+        M.is_resuming = true
         mp.commandv('loadfile', path)
         M.unbind_key()
         mpv_show_text('Resume successfully', 1500)
@@ -798,6 +804,7 @@ mp.register_event('file-loaded', function()
 
     -- clean up previous file's resources
     M.cleanup()
+    M.is_resuming = false
 
     -- reset timeout for resume prompt
     timeout = 15
