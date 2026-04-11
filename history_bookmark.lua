@@ -128,7 +128,7 @@ end
 ---@param a string
 ---@param b string
 ---@return boolean
-local function natural_sort(a, b)
+local function natural_sort_lua(a, b)
     local function split(s)
         local parts = {}
         for text, num in s:gmatch("(%D*)(%d*)") do
@@ -145,6 +145,39 @@ local function natural_sort(a, b)
         if pa[i] ~= pb[i] then return pa[i] < pb[i] end
     end
     return #pa < #pb
+end
+
+-- On Windows with LuaJIT, use Win32 API StrCmpLogicalW for accurate natural sort
+local winapi = nil
+if get_system_name() == WINDOWS then
+    local ok, ffi = pcall(require, "ffi")
+    if ok then
+        ffi.cdef[[
+            int __stdcall MultiByteToWideChar(unsigned int CodePage, unsigned long dwFlags,
+                const char *lpMultiByteStr, int cbMultiByte, wchar_t *lpWideCharStr, int cchWideChar);
+            int __stdcall StrCmpLogicalW(wchar_t *psz1, wchar_t *psz2);
+        ]]
+        local shlwapi = ffi.load("shlwapi")
+        local CP_UTF8 = 65001
+        local function utf8_to_wide(s)
+            local len = ffi.C.MultiByteToWideChar(CP_UTF8, 0, s, -1, nil, 0)
+            if len > 0 then
+                local buf = ffi.new("wchar_t[?]", len)
+                if ffi.C.MultiByteToWideChar(CP_UTF8, 0, s, -1, buf, len) > 0 then
+                    return buf
+                end
+            end
+            return ""
+        end
+        winapi = { shlwapi = shlwapi, utf8_to_wide = utf8_to_wide }
+    end
+end
+
+local function natural_sort(a, b)
+    if winapi then
+        return winapi.shlwapi.StrCmpLogicalW(winapi.utf8_to_wide(a), winapi.utf8_to_wide(b)) == -1
+    end
+    return natural_sort_lua(a, b)
 end
 
 ---
@@ -629,6 +662,14 @@ function M.record_history()
         msg.warn('No media file found in the directory: ' .. dir)
         return
     end
+
+    -- if video reached EOF, clear the bookmark
+    if mp.get_property_bool("eof-reached", false) then
+        msg.info('EOF reached, clearing bookmark for: ' .. dir)
+        M.playlist.history:delete(dir)
+        return
+    end
+
     M.playlist:record(fname)
     msg.info('Recorded: ' .. fname)
 end
