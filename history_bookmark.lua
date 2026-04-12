@@ -659,6 +659,10 @@ function M.record_history()
         msg.info('Skipping record during resume jump')
         return
     end
+    if resume_info then
+        msg.info('Skipping record while resume prompt is active')
+        return
+    end
     local path = mp.get_property('path')
     if not path then return end
     local dir, fname = utils.split_path(path)
@@ -685,8 +689,13 @@ local resume_info = nil  -- cached on file load, avoids rescanning every second
 function M.resume_count_down()
     timeout = timeout - 1
     msg.info('Count down: ' .. timeout)
-    if timeout < 1 or not resume_info then
+    if not resume_info then
         M.unbind_key()
+        return
+    end
+    if timeout < 1 then
+        M.unbind_key()
+        M.record_history()  -- record current file on timeout (resume declined)
         return
     end
 
@@ -750,6 +759,7 @@ function M.bind_key()
     end)
     mp.add_key_binding('n', 'resume_not', function()
         M.unbind_key()
+        M.record_history()  -- record current file immediately (resume declined)
         msg.info('Stay at the current episode.')
     end)
     msg.info('Bound  the keys: \"Enter\", \"n\".')
@@ -822,5 +832,7 @@ mp.register_event('file-loaded', function()
     M.bind_key()
     mp.observe_property("pause", "bool", M.on_pause)
     M.initialized = true
-    mp.add_hook("on_unload", 50, M.record_history)
 end)
+
+-- Register on_unload hook once (outside file-loaded to avoid accumulation)
+mp.add_hook("on_unload", 50, M.record_history)
